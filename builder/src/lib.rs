@@ -55,6 +55,56 @@ fn parse_field(data: &syn::Data) -> (Vec<&Option<syn::Ident>>, Vec<&syn::Type>) 
     (field_name.collect(), field_type.collect())
 }
 
+/// if matches given ident and params_count, returns `Some(Vec<params>)`
+/// else, returns `None`
+fn parse_type(ident: &str, params_count: usize, ty: &syn::Type) -> Option<Vec<syn::Type>> {
+    if let syn::Type::Path(syn::TypePath { path, .. }) = ty {
+        if path.segments.len() == 1 {
+            let seg = &path.segments[0];
+
+            if seg.ident != ident {
+                return None;
+            }
+
+            match &seg.arguments {
+                // The `<T>` in Option<T>
+                syn::PathArguments::AngleBracketed(args) => {
+                    let mut res = vec![];
+                    for a in &args.args {
+                        if let syn::GenericArgument::Type(t) = a {
+                            res.push(t.clone());
+                        }
+                    }
+
+                    if res.len() == params_count {
+                        return Some(res);
+                    } else {
+                        return None;
+                    }
+                }
+                syn::PathArguments::None => {
+                    if params_count == 0 {
+                        return Some(vec![]);
+                    } else {
+                        return None;
+                    }
+                }
+                _ => {
+                    // don't handle parenth
+                    return None;
+                }
+            }
+        } else {
+            // don't support with module path (e.g. std::option::Option<T>)
+            // only Option<T>
+            return None;
+        }
+    }
+
+    // unknown or too difficult to parse
+    None
+}
+
 fn builder_impl(data: &syn::Data, builder_name: &Ident) -> TokenStream {
     let (field_name, _) = parse_field(data);
 
