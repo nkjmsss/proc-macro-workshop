@@ -9,7 +9,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let target_name = &input.ident;
     let builder_name = Ident::new(&format!("{}Builder", target_name), Span::call_site());
 
-    let (field_name, field_type) = parse_field(&input.data);
+    let builder_struct = builder_struct(&input.data, &builder_name);
 
     // target impl
     let builder_impl = builder_impl(&input.data, &builder_name);
@@ -19,11 +19,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let build_impl = build_impl(&input.data, target_name);
 
     let expanded = quote! {
-        pub struct #builder_name {
-            #(
-                #field_name: Option<#field_type>,
-            )*
-        }
+        #builder_struct
 
         impl #target_name {
             #builder_impl
@@ -39,6 +35,104 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     proc_macro::TokenStream::from(expanded)
 }
 
+fn builder_struct(data: &syn::Data, builder_name: &Ident) -> TokenStream {
+    let (field_name, field_type) = parse_field(data);
+
+    let field_def = field_name
+        .into_iter()
+        .zip(field_type.into_iter())
+        .map(|(name, ty)| {
+            let ty = unwrap_option(ty).unwrap_or(ty.clone());
+            quote! {
+                #name: Option<#ty>,
+            }
+        });
+
+    quote! {
+        pub struct #builder_name {
+            #(
+                #field_def
+            )*
+        }
+    }
+}
+
+fn builder_impl(data: &syn::Data, builder_name: &Ident) -> TokenStream {
+    let (field_name, _) = parse_field(data);
+
+    quote! {
+        pub fn builder() -> #builder_name {
+            #builder_name {
+                #(
+                    #field_name: None,
+                )*
+            }
+        }
+    }
+}
+
+fn setter_impl(data: &syn::Data) -> TokenStream {
+    let (field_name, field_type) = parse_field(data);
+
+    let fn_def = field_name
+        .into_iter()
+        .zip(field_type.into_iter())
+        .map(|(name, ty)| {
+            let ty = unwrap_option(ty).unwrap_or(ty.clone());
+            quote! {
+                pub fn #name(&mut self, #name: #ty) -> &mut Self {
+                    self.#name = Some(#name);
+                    self
+                }
+            }
+        });
+
+    quote! {
+        #(
+            #fn_def
+        )*
+    }
+}
+
+fn build_impl(data: &syn::Data, target_name: &Ident) -> TokenStream {
+    let (field_name, field_type) = parse_field(data);
+
+    let field_def = field_name
+        .into_iter()
+        .zip(field_type.into_iter())
+        .map(|(name, ty)| {
+            if let Some(_) = unwrap_option(ty) {
+                quote! {
+                    #name: self.#name.clone(),
+                }
+            } else {
+                let err_msg = format!(
+                    "'{}' not set",
+                    name.clone()
+                        .map_or(String::from("unknown field"), |ident| ident.to_string())
+                );
+                quote! {
+                    #name: self.#name.clone().ok_or(#err_msg)?,
+                }
+            }
+        });
+
+    quote! {
+        pub fn build(&mut self) -> std::result::Result<#target_name, Box<dyn std::error::Error>> {
+            std::result::Result::Ok(
+                #target_name {
+                    #(
+                        #field_def
+                    )*
+                }
+            )
+        }
+    }
+}
+
+// =====================
+// utils
+// =====================
 fn parse_field(data: &syn::Data) -> (Vec<&Option<syn::Ident>>, Vec<&syn::Type>) {
     let fields = match data {
         syn::Data::Struct(syn::DataStruct {
@@ -82,6 +176,7 @@ fn parse_type(ident: &str, params_count: usize, ty: &syn::Type) -> Option<Vec<sy
                         return None;
                     }
                 }
+                // without params
                 syn::PathArguments::None => {
                     if params_count == 0 {
                         return Some(vec![]);
@@ -105,56 +200,6 @@ fn parse_type(ident: &str, params_count: usize, ty: &syn::Type) -> Option<Vec<sy
     None
 }
 
-fn builder_impl(data: &syn::Data, builder_name: &Ident) -> TokenStream {
-    let (field_name, _) = parse_field(data);
-
-    quote! {
-        pub fn builder() -> #builder_name {
-            #builder_name {
-                #(
-                    #field_name: None,
-                )*
-            }
-        }
-    }
-}
-
-fn setter_impl(data: &syn::Data) -> TokenStream {
-    let (field_name, field_type) = parse_field(data);
-    let field_name2 = field_name.clone();
-    let field_name3 = field_name.clone();
-    let field_name4 = field_name.clone();
-
-    quote! {
-        #(
-            pub fn #field_name(&mut self, #field_name2: #field_type) -> &mut Self {
-                self.#field_name3 = Some(#field_name4);
-                self
-            }
-        )*
-    }
-}
-
-fn build_impl(data: &syn::Data, target_name: &Ident) -> TokenStream {
-    let (field_name, _) = parse_field(data);
-    let field_name2 = field_name.clone();
-    let err_msg = field_name.clone().into_iter().map(|v| {
-        if let Some(v) = v {
-            Some(format!("'{}' not set", v.to_string()))
-        } else {
-            None
-        }
-    });
-
-    quote! {
-        pub fn build(&mut self) -> std::result::Result<#target_name, Box<dyn std::error::Error>> {
-            std::result::Result::Ok(
-                #target_name {
-                    #(
-                        #field_name: self.#field_name2.clone().ok_or(#err_msg)?,
-                    )*
-                }
-            )
-        }
-    }
+fn unwrap_option(ty: &syn::Type) -> Option<syn::Type> {
+    parse_type("Option", 1, ty).map(|v| v[0].clone())
 }
