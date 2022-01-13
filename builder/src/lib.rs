@@ -11,6 +11,7 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     let (field_name, field_type) = parse_field(&input.data);
     let builder_impl = builder_impl(&input.data, &builder_name);
+    let setter_impl = setter_impl(&input.data);
 
     let expanded = quote! {
         pub struct #builder_name {
@@ -21,6 +22,10 @@ pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
         impl #target_name {
             #builder_impl
+        }
+
+        impl #builder_name {
+            #setter_impl
         }
     };
 
@@ -55,5 +60,21 @@ fn builder_impl(data: &syn::Data, builder_name: &Ident) -> TokenStream {
                 )*
             }
         }
+    }
+}
+
+fn setter_impl(data: &syn::Data) -> TokenStream {
+    let (field_name, field_type) = parse_field(data);
+    let field_name2 = field_name.clone();
+    let field_name3 = field_name.clone();
+    let field_name4 = field_name.clone();
+
+    quote! {
+        #(
+            pub fn #field_name(&mut self, #field_name2: #field_type) -> &mut Self {
+                self.#field_name3 = Some(#field_name4);
+                self
+            }
+        )*
     }
 }
