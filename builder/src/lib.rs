@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use itertools::izip;
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput};
@@ -86,7 +87,13 @@ fn setter_impl(data: &syn::Data) -> TokenStream {
              attrs,
              ..
          }| {
-            match parse_each_attr(attrs) {
+            let attrs = parse_attrs(attrs);
+
+            if let Some(tok) = get_attrs_error(&attrs) {
+                return tok;
+            }
+
+            match get_attr_each(&attrs) {
                 Ok(fn_name) => {
                     if let Some(ty) = unwrap_vec(ty) {
                         let fn_name = Ident::new(&fn_name, Span::call_site());
@@ -103,12 +110,11 @@ fn setter_impl(data: &syn::Data) -> TokenStream {
                             }
                         };
                     } else {
-                        return syn::Error::new_spanned(f, "each attr is only for `Vec<T>`")
-                            .to_compile_error();
+                        return mk_error(f, Errors::AttrEachToInvalidType);
                     }
                 }
-                Err(Some(e)) => return syn::Error::new_spanned(f, e).to_compile_error(),
-                _ => {}
+                Err(Some(tok)) => return tok,
+                Err(None) => {}
             }
 
             let ty = unwrap_option(ty).unwrap_or(ty.clone());
@@ -131,39 +137,61 @@ fn setter_impl(data: &syn::Data) -> TokenStream {
 fn build_impl(data: &syn::Data, target_name: &Ident) -> TokenStream {
     let fields = parse_field(data);
 
-    let field_def = fields.into_iter().map(
-        |f @ syn::Field {
-             ident: name,
-             ty,
-             attrs,
-             ..
-         }| {
-            match parse_each_attr(attrs) {
-                Ok(_) => {
-                    return quote! {
-                        #name: self.#name.clone().unwrap_or(vec![]),
-                    }
-                }
-                Err(Some(e)) => return syn::Error::new_spanned(f, e).to_compile_error(),
-                _ => {}
-            }
+    let field_def = fields
+        .into_iter()
+        .map(
+            |syn::Field {
+                 ident: name,
+                 ty,
+                 attrs,
+                 ..
+             }| {
+                let attrs = parse_attrs(attrs);
 
-            if let Some(_) = unwrap_option(ty) {
-                quote! {
-                    #name: self.#name.clone(),
+                if let Some(tok) = get_attrs_error(&attrs) {
+                    return Err(tok);
                 }
-            } else {
-                let err_msg = format!(
-                    "'{}' not set",
-                    name.clone()
-                        .map_or(String::from("unknown field"), |ident| ident.to_string())
-                );
-                quote! {
-                    #name: self.#name.clone().ok_or(#err_msg)?,
+
+                match get_attr_each(&attrs) {
+                    Ok(_) => {
+                        return Ok(quote! {
+                            #name: self.#name.clone().unwrap_or(vec![]),
+                        })
+                    }
+                    Err(Some(tok)) => return Err(tok),
+                    _ => {}
                 }
+
+                if let Some(_) = unwrap_option(ty) {
+                    Ok(quote! {
+                        #name: self.#name.clone(),
+                    })
+                } else {
+                    let err_msg = format!(
+                        "'{}' not set",
+                        name.clone()
+                            .map_or(String::from("unknown field"), |ident| ident.to_string())
+                    );
+                    Ok(quote! {
+                        #name: self.#name.clone().ok_or(#err_msg)?,
+                    })
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+
+    if let Some(err) = (|| {
+        for f in &field_def {
+            if let Err(e) = f {
+                return Some(e.clone());
             }
-        },
-    );
+        }
+        None
+    })() {
+        return err;
+    }
+
+    let field_def = field_def.iter().map(|f| f.as_ref().unwrap());
 
     quote! {
         pub fn build(&mut self) -> std::result::Result<#target_name, Box<dyn std::error::Error>> {
@@ -174,6 +202,38 @@ fn build_impl(data: &syn::Data, target_name: &Ident) -> TokenStream {
                     )*
                 }
             )
+        }
+    }
+}
+
+// =====================
+// enums
+// =====================
+enum Attrs {
+    Each(String),
+}
+
+enum Errors {
+    Unhandled(String),
+    UnknownAttr(String),
+    ParseArgs(String),
+    AttrEachAppearedMultiple,
+    AttrEachToInvalidType,
+}
+
+impl std::fmt::Display for Errors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unhandled(name) => write!(f, "Unhandled error: {}", name),
+            Self::UnknownAttr(attr) => {
+                writeln!(f, "unknown attr '{}' was given", attr)?;
+                write!(f, "consider writing `each = \"...\"`")
+            }
+            Self::ParseArgs(error) => write!(f, "Parse args error: {}", error),
+            Self::AttrEachAppearedMultiple => {
+                write!(f, "attr 'each' was implemented multiple times")
+            }
+            Self::AttrEachToInvalidType => write!(f, "each attr is only for `Vec<T>`"),
         }
     }
 }
@@ -252,11 +312,15 @@ fn unwrap_vec(ty: &syn::Type) -> Option<syn::Type> {
     parse_type("Vec", 1, ty).map(|v| v[0].clone())
 }
 
-fn parse_attrs(
+fn mk_error(tokens: impl quote::ToTokens, err: Errors) -> TokenStream {
+    syn::Error::new_spanned(tokens, err).to_compile_error()
+}
+
+fn parse_attr<'a>(
     attr_ident: &str,
     key_ident: &str,
-    attrs: &Vec<syn::Attribute>,
-) -> Vec<Result<String, Option<String>>> {
+    attrs: &'a Vec<syn::Attribute>,
+) -> Vec<Result<(String, &'a syn::Attribute), TokenStream>> {
     attrs
         .iter()
         .map(|attr| {
@@ -269,41 +333,78 @@ fn parse_attrs(
                                 && meta.path.segments[0].ident == key_ident
                             {
                                 if let syn::Lit::Str(s) = meta.lit {
-                                    return Ok(s.value());
+                                    return Ok((s.value(), attr));
                                 }
                             } else {
-                                return Err(Some(format!(
-                                    "parse_attrs: unknown attr '{}' was given",
-                                    meta.path.segments[0].ident
-                                )));
+                                // return Err(mk_error(attr, "expected `builder(each = \"...\")`"));
+                                // eprintln!("{:#?}", );
+                                return Err(mk_error(
+                                    &meta,
+                                    Errors::UnknownAttr(meta.path.segments[0].ident.to_string()),
+                                ));
                             }
                         }
                     }
-                    Err(e) => {
-                        return Err(Some(format!("parse_attrs: {}", e)));
-                    }
+                    Err(e) => return Err(mk_error(attr, Errors::ParseArgs(e.to_string()))),
                 }
             }
 
-            Err(None)
+            Err(mk_error(
+                attr,
+                Errors::Unhandled(String::from("parse_attr")),
+            ))
         })
         .collect::<Vec<_>>()
 }
 
-fn parse_each_attr(attrs: &Vec<syn::Attribute>) -> Result<String, Option<String>> {
-    let each_key = parse_attrs("builder", "each", attrs);
-    let each_key = each_key
-        .iter()
-        .filter_map(|k| k.as_ref().ok())
-        .collect::<Vec<_>>();
-    if each_key.len() > 1 {
-        return Err(Some(String::from(
-            "attr 'each' was implemented multiple times",
-        )));
+fn parse_attrs<'a>(
+    attrs: &'a Vec<syn::Attribute>,
+) -> Vec<Result<(Attrs, &'a syn::Attribute), TokenStream>> {
+    let each_attrs = parse_attr("builder", "each", attrs);
+
+    izip!(each_attrs)
+        .map(|attrs| match attrs {
+            Ok((each_attr, attr)) => Ok((Attrs::Each(each_attr), attr)),
+            Err(err) => Err(err),
+        })
+        .collect::<Vec<_>>()
+}
+
+fn get_attrs_error(
+    attrs: &Vec<Result<(Attrs, &syn::Attribute), TokenStream>>,
+) -> Option<TokenStream> {
+    for attr in attrs {
+        if let Err(tok) = attr {
+            return Some(tok.clone());
+        }
     }
 
-    if each_key.len() == 1 {
-        return Ok(each_key[0].to_string());
+    None
+}
+
+fn get_attr_each(
+    attrs: &Vec<Result<(Attrs, &syn::Attribute), TokenStream>>,
+) -> Result<String, Option<TokenStream>> {
+    let keys = attrs
+        .iter()
+        .filter_map(|a| {
+            if let Ok((Attrs::Each(e), attr)) = a {
+                Some((e, attr))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if keys.len() > 1 {
+        let attr = keys.iter().last().unwrap().1;
+
+        return Err(Some(mk_error(attr, Errors::AttrEachAppearedMultiple)));
     }
+
+    if keys.len() == 1 {
+        return Ok(keys[0].0.to_string());
+    }
+
     Err(None)
 }
