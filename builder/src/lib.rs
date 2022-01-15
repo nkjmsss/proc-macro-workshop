@@ -47,7 +47,7 @@ fn builder_struct(data: &syn::Data, builder_name: &Ident) -> TokenStream {
          }| {
             let ty = unwrap_option(ty).unwrap_or(ty.clone());
             quote! {
-                #name: Option<#ty>,
+                #name: ::std::option::Option<#ty>,
             }
         },
     );
@@ -69,7 +69,7 @@ fn builder_impl(data: &syn::Data, builder_name: &Ident) -> TokenStream {
         pub fn builder() -> #builder_name {
             #builder_name {
                 #(
-                    #field_name: None,
+                    #field_name: ::std::option::Option::None,
                 )*
             }
         }
@@ -101,10 +101,12 @@ fn setter_impl(data: &syn::Data) -> TokenStream {
 
                         return quote! {
                             pub fn #fn_name(&mut self, #fn_name: #ty) -> &mut Self {
-                                if let Some(mut #vec_name) = self.#name.as_mut() {
+                                if let ::std::option::Option::Some(mut #vec_name) = self.#name.as_mut() {
                                     #vec_name.push(#fn_name);
                                 } else {
-                                    self.#name = Some(vec![#fn_name]);
+                                    let mut #vec_name = ::std::vec::Vec::new();
+                                    #vec_name.push(#fn_name);
+                                    self.#name = ::std::option::Option::Some(#vec_name);
                                 }
                                 self
                             }
@@ -120,7 +122,7 @@ fn setter_impl(data: &syn::Data) -> TokenStream {
             let ty = unwrap_option(ty).unwrap_or(ty.clone());
             quote! {
                 pub fn #name(&mut self, #name: #ty) -> &mut Self {
-                    self.#name = Some(#name);
+                    self.#name = ::std::option::Option::Some(#name);
                     self
                 }
             }
@@ -155,7 +157,7 @@ fn build_impl(data: &syn::Data, target_name: &Ident) -> TokenStream {
                 match get_attr_each(&attrs) {
                     Ok(_) => {
                         return Ok(quote! {
-                            #name: self.#name.clone().unwrap_or(vec![]),
+                            #name: self.#name.clone().unwrap_or(::std::vec::Vec::new()),
                         })
                     }
                     Err(Some(tok)) => return Err(tok),
@@ -194,8 +196,8 @@ fn build_impl(data: &syn::Data, target_name: &Ident) -> TokenStream {
     let field_def = field_def.iter().map(|f| f.as_ref().unwrap());
 
     quote! {
-        pub fn build(&mut self) -> std::result::Result<#target_name, Box<dyn std::error::Error>> {
-            std::result::Result::Ok(
+        pub fn build(&mut self) -> ::std::result::Result<#target_name, ::std::boxed::Box<dyn ::std::error::Error>> {
+            ::std::result::Result::Ok(
                 #target_name {
                     #(
                         #field_def
